@@ -3,6 +3,13 @@ FastAPI WebSocket and REST Server for Vaani Real-Time Speech Recognition.
 Provides low-latency binary audio streaming endpoint for ESP32 edge devices.
 """
 
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+import asyncio
 import json
 import logging
 import socket
@@ -10,7 +17,10 @@ import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 
+import colorama
+from colorama import Fore, Style
 import numpy as np
+import pyfiglet
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -18,6 +28,9 @@ from fastapi.responses import JSONResponse
 from config import config
 from engine import ASREngine
 from vad_stream import StreamVAD, SpeechState
+
+# Initialize colorama for ANSI support on Windows
+colorama.init()
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +41,59 @@ logger = logging.getLogger("vaani_asr.server")
 
 # Global ASR engine instance
 asr_engine: ASREngine = None
+
+
+def print_large_transcript_banner(
+    transcript: str,
+    latency_ms: float = 0.0,
+    duration_sec: float = 0.0,
+    lang: str = "hi",
+    confidence: float = 0.98,
+):
+    """Prints a prominent, large-font high-contrast banner for demonstration videos."""
+    width = 78
+    clean_text = transcript.strip()
+
+    try:
+        b_top = f"{Fore.CYAN}╔{'═' * (width - 2)}╗{Style.RESET_ALL}"
+        b_mid = f"{Fore.CYAN}╠{'═' * (width - 2)}╣{Style.RESET_ALL}"
+        b_bot = f"{Fore.CYAN}╚{'═' * (width - 2)}╝{Style.RESET_ALL}"
+    except Exception:
+        b_top = f"+{'-' * (width - 2)}+"
+        b_mid = f"+{'-' * (width - 2)}+"
+        b_bot = f"+{'-' * (width - 2)}+"
+
+    print("\n" + b_top)
+    title = "🎯  VAANI CLOUD SPEECH RECOGNITION (ASR)"
+    pad_title = max(0, (width - 2 - len(title)) // 2)
+    right_pad = max(0, width - 2 - pad_title - len(title))
+    print(f"{Fore.CYAN}║{Style.RESET_ALL}{' ' * pad_title}{Fore.YELLOW}{Style.BRIGHT}{title}{Style.RESET_ALL}{' ' * right_pad}{Fore.CYAN}║{Style.RESET_ALL}")
+    print(b_mid)
+
+    # Render in ASCII big block letters if reasonable length and ASCII characters
+    if clean_text and all(ord(c) < 128 for c in clean_text) and len(clean_text) <= 35:
+        try:
+            fig = pyfiglet.figlet_format(clean_text.upper(), font="small", width=width - 6)
+            for line in fig.splitlines():
+                if line.strip():
+                    l_pad = max(0, width - 4 - len(line))
+                    print(f"{Fore.CYAN}║{Style.RESET_ALL}  {Fore.GREEN}{Style.BRIGHT}{line}{' ' * l_pad}{Style.RESET_ALL}{Fore.CYAN}║{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}║{' ' * (width - 2)}║{Style.RESET_ALL}")
+        except Exception:
+            pass
+
+    # High-contrast readable quote line
+    print(f"{Fore.CYAN}║{Style.RESET_ALL}  {Fore.WHITE}{Style.BRIGHT}TRANSCRIPT:{Style.RESET_ALL}{' ' * max(0, width - 15)}{Fore.CYAN}║{Style.RESET_ALL}")
+    quote = f'>>> "{clean_text}" <<<'
+    pad_q = max(0, width - 4 - len(quote))
+    print(f"{Fore.CYAN}║{Style.RESET_ALL}  {Fore.YELLOW}{Style.BRIGHT}{quote}{' ' * pad_q}{Style.RESET_ALL}{Fore.CYAN}║{Style.RESET_ALL}")
+    print(b_mid)
+
+    conf_pct = confidence * 100.0 if confidence <= 1.0 else confidence
+    stats = f"⚡ Latency: {latency_ms:.1f} ms  |  🔊 Audio: {duration_sec:.1f} s  |  🌐 Lang: {lang} ({conf_pct:.0f}%)"
+    pad_s = max(0, width - 4 - len(stats))
+    print(f"{Fore.CYAN}║{Style.RESET_ALL}  {Fore.CYAN}{Style.BRIGHT}{stats}{' ' * pad_s}{Style.RESET_ALL}{Fore.CYAN}║{Style.RESET_ALL}")
+    print(b_bot + "\n", flush=True)
 
 
 def get_local_lan_ip() -> str:
@@ -169,34 +235,24 @@ async def websocket_transcribe(websocket: WebSocket):
 
                 if is_complete:
                     audio_float32 = vad.get_audio_float32()
-                    t_transcribe_start = time.time()
-
-                    logger.info(
-                        f"Utterance complete ({vad.duration_sec:.2f}s). Transcribing..."
-                    )
-                    result = asr_engine.transcribe(audio_float32)
-
-                    total_turnaround_ms = (time.time() - t_transcribe_start) * 1000
-
-                    response = {
-                        "type": "transcription",
-                        "status": "success",
-                        "transcript": result["transcript"],
-                        "language": result["language"],
-                        "confidence": result["language_probability"],
-                        "audio_duration_sec": result["audio_duration_sec"],
-                        "asr_latency_ms": result["asr_latency_ms"],
-                        "turnaround_ms": round(total_turnaround_ms, 2),
-                    }
-
-                    logger.info(
-                        f"🎯 Transcript: '{result['transcript']}' "
-                        f"({result['asr_latency_ms']:.1f}ms ASR, {result['audio_duration_sec']}s audio)"
-                    )
-                    await websocket.send_text(json.dumps(response))
-
-                    # Reset stream buffer to accept the next utterance seamlessly
                     vad.reset()
+
+                    # Immediately signal ESP32 to stop sending audio frames
+                    await websocket.send_text(json.dumps({"type": "stop"}))
+
+                    if len(audio_float32) > 0:
+                        t_transcribe_start = time.time()
+                        # Run transcribe in background worker thread so the event loop is NEVER blocked
+                        result = await asyncio.to_thread(asr_engine.transcribe, audio_float32)
+
+                        # Display prominent large banner directly in server terminal for the video
+                        print_large_transcript_banner(
+                            transcript=result["transcript"],
+                            latency_ms=result["asr_latency_ms"],
+                            duration_sec=result["audio_duration_sec"],
+                            lang=result["language"],
+                            confidence=result["language_probability"],
+                        )
 
             elif "text" in message and message["text"]:
                 try:
@@ -211,26 +267,20 @@ async def websocket_transcribe(websocket: WebSocket):
                     elif action == "flush":
                         # Manually force transcription of current buffer
                         audio_float32 = vad.get_audio_float32()
-                        if len(audio_float32) > 0:
-                            result = asr_engine.transcribe(audio_float32)
-                            await websocket.send_text(
-                                json.dumps({
-                                    "type": "transcription",
-                                    "status": "success",
-                                    **result,
-                                })
-                            )
-                        else:
-                            await websocket.send_text(
-                                json.dumps({
-                                    "type": "transcription",
-                                    "status": "empty",
-                                    "transcript": "",
-                                    "audio_duration_sec": 0.0,
-                                    "asr_latency_ms": 0.0,
-                                })
-                            )
                         vad.reset()
+
+                        # Signal ESP32 that stream is finished
+                        await websocket.send_text(json.dumps({"type": "stop"}))
+
+                        if len(audio_float32) > 0:
+                            result = await asyncio.to_thread(asr_engine.transcribe, audio_float32)
+                            print_large_transcript_banner(
+                                transcript=result["transcript"],
+                                latency_ms=result["asr_latency_ms"],
+                                duration_sec=result["audio_duration_sec"],
+                                lang=result["language"],
+                                confidence=result["language_probability"],
+                            )
                     elif action == "ping":
                         await websocket.send_text(
                             json.dumps({"type": "pong", "time": time.time()})
