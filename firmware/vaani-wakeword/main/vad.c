@@ -108,13 +108,13 @@ float vad_process_frame(const int16_t *frame, size_t num_samples)
     /* Activate after consecutive speech frames */
     if (!s_active && s_speech_frames >= VAD_START_FRAMES) {
         s_active = true;
-        ESP_LOGI(TAG, "Speech START (energy: %.1f dBFS >= threshold %.1f)", db, VAD_THRESHOLD_DB);
+        ESP_LOGD(TAG, "Speech START (energy: %.1f dBFS >= threshold %.1f)", db, VAD_THRESHOLD_DB);
     }
 
     /* Deactivate after consecutive silent frames */
     if (s_active && s_silent_frames >= VAD_END_FRAMES) {
         s_active = false;
-        ESP_LOGI(TAG, "Speech END (energy: %.1f dBFS < threshold %.1f)", db, VAD_THRESHOLD_DB);
+        ESP_LOGD(TAG, "Speech END (energy: %.1f dBFS < threshold %.1f)", db, VAD_THRESHOLD_DB);
     }
 
     return db;

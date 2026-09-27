@@ -249,3 +249,7 @@ compile_commands.json
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch/
+
+# Local Wi-Fi Credentials
+firmware/vaani-wakeword/main/wifi_config.h
+!firmware/vaani-wakeword/main/wifi_config.example.h

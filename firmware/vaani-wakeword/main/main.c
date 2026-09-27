@@ -40,6 +40,9 @@
 #include "vad.h"
 #include "mel_features.h"
 #include "kws_model.h"
+#include "wifi_manager.h"
+#include "ws_streamer.h"
+#include "wifi_config.h"
 
 static const char *TAG = "VAANI";
 
@@ -81,6 +84,17 @@ static const char *TAG = "VAANI";
 static int16_t s_window_buf[AUDIO_BUF_SAMPLES];
 static volatile int s_infer_busy = 0;   /* set while core1 owns the buffer */
 
+typedef enum {
+    SYSTEM_STATE_LISTENING = 0,
+    SYSTEM_STATE_STREAMING,
+} system_state_t;
+
+static volatile system_state_t s_system_state = SYSTEM_STATE_LISTENING;
+static volatile int64_t s_stream_start_us = 0;
+static volatile bool s_need_buffer_flush = false;
+static volatile int64_t s_last_feat_us = 0;
+static volatile int64_t s_last_infer_us = 0;
+
 typedef struct {
     int16_t *buf;       /* always &s_window_buf[0]; kept as a pointer so
                             the queue payload stays uniform if a second
@@ -113,6 +127,32 @@ static void audio_capture_task(void *arg)
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "[core0] I2S read error, skipping frame");
             continue;
+        }
+
+        /* Check if audio buffer needs flush following completed stream */
+        if (s_need_buffer_flush) {
+            memset(rolling_buf, 0, sizeof(rolling_buf));
+            total_samples_read = 0;
+            samples_since_kws = 0;
+            s_need_buffer_flush = false;
+            ESP_LOGI(TAG, "[stream] Audio buffer flushed, KWS listening resumed.");
+        }
+
+        /* If streaming mode is active, pipe raw PCM directly over warm WebSocket */
+        if (s_system_state == SYSTEM_STATE_STREAMING) {
+            int64_t now_us = esp_timer_get_time();
+            int64_t elapsed_us = now_us - s_stream_start_us;
+
+            if (elapsed_us >= (int64_t)(VAANI_STREAM_MAX_SEC * 1000000ULL)) {
+                ESP_LOGW(TAG, "[stream] Safety timeout (%.1fs) reached, stopping stream", (double)VAANI_STREAM_MAX_SEC);
+                ws_streamer_send_text("{\"action\": \"flush\"}");
+                s_system_state = SYSTEM_STATE_LISTENING;
+                s_need_buffer_flush = true;
+                gpio_set_level(LED_INDICATOR_GPIO, 0);
+            } else {
+                ws_streamer_send_pcm(frame_buf, FRAME_SAMPLES * sizeof(int16_t));
+            }
+            continue; /* Skip KWS inference window while streaming command */
         }
 
         memmove(rolling_buf, rolling_buf + FRAME_SAMPLES,
@@ -187,8 +227,10 @@ static void kws_infer_task(void *arg)
         }
 
         if (led_off_time > 0 && esp_timer_get_time() >= led_off_time) {
-            gpio_set_level(LED_INDICATOR_GPIO, 0);
-            led_off_time = 0;
+            if (s_system_state != SYSTEM_STATE_STREAMING) {
+                gpio_set_level(LED_INDICATOR_GPIO, 0);
+                led_off_time = 0;
+            }
         }
 
         int64_t t0 = esp_timer_get_time();
@@ -208,30 +250,154 @@ static void kws_infer_task(void *arg)
             continue;
         }
 
+        s_last_feat_us = t_feat;
+        s_last_infer_us = t_infer;
+
         bool raw_hit = (p_vaani >= KWS_THRESHOLD);
 
         if (raw_hit) {
             s_consecutive_hits++;
-            /* Equality (not >=) is deliberate: fires exactly once per sustained
-             * utterance rather than re-triggering the LED on every window of a
-             * multi-window hit. Counter keeps climbing past this point but is
-             * never re-checked until it resets to 0 in the else branch below. */
             if (s_consecutive_hits == KWS_MIN_CONSECUTIVE) {
                 total_detections++;
                 gpio_set_level(LED_INDICATOR_GPIO, 1);
-                led_off_time = esp_timer_get_time() + LED_HOLD_TIME_US;
 
-                ESP_LOGW(TAG,
-                    "***  VAANI DETECTED! (confirmed %d windows)  ***  P(Vaani)=%.4f  [feat %lld us | infer %lld us]  [total: %d]",
-                    s_consecutive_hits, p_vaani, t_feat, t_infer, total_detections);
+                int64_t t_wake = esp_timer_get_time();
+                int64_t handoff_us = 0;
+
+                if (ws_streamer_is_connected()) {
+                    s_stream_start_us = esp_timer_get_time();
+                    s_system_state = SYSTEM_STATE_STREAMING;
+                    handoff_us = esp_timer_get_time() - t_wake;
+                    printf("\n🔔 [WAKE] \"Vaani\" CONFIRMED (P=%.4f) | handoff=%.2f ms | Streaming to ASR Server...\n",
+                           p_vaani, (float)handoff_us / 1000.0f);
+                } else {
+                    printf("\n🔔 [WAKE] \"Vaani\" CONFIRMED (P=%.4f) | WebSocket not connected!\n", p_vaani);
+                    led_off_time = esp_timer_get_time() + LED_HOLD_TIME_US;
+                }
             }
         } else {
             s_consecutive_hits = 0;
-            ESP_LOGI(TAG,
-                "P(Vaani)=%.4f  P(Unknown)=%.4f  [feat %lld us | infer %lld us]",
-                p_vaani, p_unknown, t_feat, t_infer);
+            /* Only log candidate if confidence is notable to avoid flooding console */
+            if (p_vaani >= 0.40f) {
+                printf("  [kws] Candidate: P(Vaani)=%.4f  P(Unknown)=%.4f\n", p_vaani, p_unknown);
+            }
         }
     }
+}
+
+/* ================================================================
+ * Real-Time Telemetry & Resource Profiling Task
+ * ================================================================ */
+
+static void telemetry_task(void *arg)
+{
+    (void)arg;
+    static TaskStatus_t prev_tasks[24];
+    static UBaseType_t prev_count = 0;
+    static uint32_t prev_total_runtime = 0;
+
+    vTaskDelay(pdMS_TO_TICKS(3000)); /* Allow boot sequence and Wi-Fi to settle */
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        TaskStatus_t curr_tasks[24];
+        uint32_t curr_total_runtime = 0;
+        UBaseType_t curr_count = uxTaskGetSystemState(curr_tasks, 24, &curr_total_runtime);
+
+        uint32_t free_heap = esp_get_free_heap_size();
+        uint32_t min_free_heap = esp_get_minimum_free_heap_size();
+
+        if (curr_count > 0 && prev_count > 0 && curr_total_runtime > prev_total_runtime) {
+            uint32_t total_delta = curr_total_runtime - prev_total_runtime;
+            uint32_t idle0_delta = 0;
+            uint32_t idle1_delta = 0;
+
+            for (int i = 0; i < curr_count; i++) {
+                for (int j = 0; j < prev_count; j++) {
+                    if (curr_tasks[i].xHandle == prev_tasks[j].xHandle) {
+                        uint32_t dt = curr_tasks[i].ulRunTimeCounter - prev_tasks[j].ulRunTimeCounter;
+                        if (strcmp(curr_tasks[i].pcTaskName, "IDLE0") == 0) {
+                            idle0_delta = dt;
+                        } else if (strcmp(curr_tasks[i].pcTaskName, "IDLE1") == 0) {
+                            idle1_delta = dt;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            float core0_idle = (float)idle0_delta * 100.0f / (float)total_delta;
+            float core1_idle = (float)idle1_delta * 100.0f / (float)total_delta;
+            if (core0_idle > 100.0f) core0_idle = 100.0f;
+            if (core1_idle > 100.0f) core1_idle = 100.0f;
+            float total_idle = (core0_idle + core1_idle) / 2.0f;
+
+            const char *state_str = (s_system_state == SYSTEM_STATE_STREAMING) ? "STREAMING" : "LISTENING";
+
+            printf("[TELEMETRY] state=%s cpu_idle=%.1f%% core0_idle=%.1f%% core1_idle=%.1f%% heap_free_kb=%.1f heap_min_kb=%.1f feat_ms=%.1f infer_ms=%.1f\n",
+                   state_str,
+                   total_idle,
+                   core0_idle,
+                   core1_idle,
+                   (float)free_heap / 1024.0f,
+                   (float)min_free_heap / 1024.0f,
+                   (float)s_last_feat_us / 1000.0f,
+                   (float)s_last_infer_us / 1000.0f);
+        }
+
+        if (curr_count > 0) {
+            memcpy(prev_tasks, curr_tasks, sizeof(TaskStatus_t) * curr_count);
+            prev_count = curr_count;
+            prev_total_runtime = curr_total_runtime;
+        }
+    }
+}
+
+/* ================================================================
+ * Phase 1 Boot Test: Background Wi-Fi & Warm WebSocket Task
+ * ================================================================ */
+
+static void ws_text_rx_cb(const char *data, size_t len)
+{
+    /* Check if this is a transcription response */
+    if (strstr(data, "\"type\": \"transcription\"") != NULL ||
+        strstr(data, "\"type\":\"transcription\"") != NULL) {
+
+        printf("\n🎯 [ASR] %.*s\n\n", (int)len, data);
+
+        /* Stop streaming and return to listening */
+        if (s_system_state == SYSTEM_STATE_STREAMING) {
+            s_system_state = SYSTEM_STATE_LISTENING;
+            s_need_buffer_flush = true;
+            gpio_set_level(LED_INDICATOR_GPIO, 0);
+        }
+    }
+}
+
+static void wifi_ws_boot_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "[net] Initializing Wi-Fi Station...");
+    esp_err_t err = wifi_manager_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[net] Wi-Fi init failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "[net] Waiting for Wi-Fi IP assignment...");
+    while (!wifi_manager_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    ESP_LOGI(TAG, "[net] Wi-Fi connected! Connecting warm WebSocket to: %s", VAANI_ASR_WS_URL);
+    err = ws_streamer_init(VAANI_ASR_WS_URL, ws_text_rx_cb);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[net] Failed to init WebSocket: %s", esp_err_to_name(err));
+    }
+
+    vTaskDelete(NULL);
 }
 
 /* ================================================================
@@ -293,5 +459,11 @@ void app_main(void)
     ESP_LOGI(TAG, "Tasks launched: capture on core %d, inference on core %d",
              CAPTURE_TASK_CORE, INFER_TASK_CORE);
 
-    /* app_main can return here — both tasks keep running independently. */
+    /* Launch background network connection task */
+    xTaskCreate(wifi_ws_boot_task, "wifi_ws_boot", 4096, NULL, 3, NULL);
+
+    /* Launch background telemetry task for real-time CPU, RAM & latency profiling */
+    xTaskCreate(telemetry_task, "telemetry", 4096, NULL, 1, NULL);
+
+    /* app_main can return here — all tasks keep running independently. */
 }

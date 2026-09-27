@@ -1,6 +1,6 @@
 dependencies:
   espressif/esp-nn:
-    component_hash: 41b0ab49a5a5c88fc7331d76fc5cc58d1ec3e356ff42ea9cb88270daf415ffef
+    component_hash: 3b3411b0e4ad1717a72870fde9f9b67cef6f3f97491cc64fcfc1910a8fd8a246
     dependencies:
     - name: idf
       require: private
@@ -8,7 +8,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.3.2
+    version: 1.4.1
   espressif/esp-tflite-micro:
     component_hash: 1ce00c44af2362d48b5c0eefc5fcc60fa54d84db332c80005ae324556f4df0db
     dependencies:
@@ -23,12 +23,23 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.4.0
+  espressif/esp_websocket_client:
+    component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.0
   idf:
     source:
       type: idf
     version: 6.1.0
 direct_dependencies:
 - espressif/esp-tflite-micro
-manifest_hash: 2dd7cf87c231879fc82ce6195440b0b93e58349f942661d946631697006818b9
+- espressif/esp_websocket_client
+manifest_hash: dfd6e2a8691cc6aaa46dcffad502526cd1a8a5635d46839faeb35f8d8de52518
 target: esp32
 version: 3.0.0
