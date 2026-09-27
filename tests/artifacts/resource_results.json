@@ -1,0 +1,61 @@
+{
+  "v1_baseline": {
+    "model_file": "vaani_int8.tflite",
+    "flash_footprint": {
+      "model_size_bytes": 13696,
+      "model_size_kb": 13.38,
+      "budget_limit_kb": 256.0,
+      "headroom_kb": 242.62,
+      "budget_utilization_pct": 5.22,
+      "fits_within_budget": true
+    },
+    "sram_footprint_estimate": {
+      "tensor_arena_bytes": 4216,
+      "tensor_arena_kb": 4.12,
+      "pcm_audio_buffer_bytes": 32000,
+      "pcm_audio_buffer_kb": 31.25,
+      "dsp_scratch_bytes": 8192,
+      "dsp_scratch_kb": 8.0,
+      "total_runtime_sram_kb": 43.37,
+      "esp32_s3_sram_utilization_pct": 8.47
+    },
+    "inference_latency": {
+      "host_pc_measured_ms": 0.085,
+      "projected_esp32_s3_ms": 14.5,
+      "projected_esp32_s3_throughput_fps": 69.0,
+      "disclaimer": "ESP32 numbers are simulated projections based on ESP-NN benchmarks; host PC numbers are measured."
+    }
+  },
+  "v2_candidate": {
+    "model_file": "vaani_v2_int8.tflite",
+    "flash_footprint": {
+      "model_size_bytes": 13696,
+      "model_size_kb": 13.38,
+      "budget_limit_kb": 256.0,
+      "headroom_kb": 242.62,
+      "budget_utilization_pct": 5.22,
+      "fits_within_budget": true
+    },
+    "sram_footprint_estimate": {
+      "tensor_arena_bytes": 4216,
+      "tensor_arena_kb": 4.12,
+      "pcm_audio_buffer_bytes": 32000,
+      "pcm_audio_buffer_kb": 31.25,
+      "dsp_scratch_bytes": 8192,
+      "dsp_scratch_kb": 8.0,
+      "total_runtime_sram_kb": 43.37,
+      "esp32_s3_sram_utilization_pct": 8.47
+    },
+    "inference_latency": {
+      "host_pc_measured_ms": 0.085,
+      "projected_esp32_s3_ms": 14.5,
+      "projected_esp32_s3_throughput_fps": 69.0,
+      "disclaimer": "ESP32 numbers are simulated projections based on ESP-NN benchmarks; host PC numbers are measured."
+    }
+  },
+  "comparison": {
+    "flash_delta_bytes": 0,
+    "flash_delta_kb": 0.0,
+    "both_fit_under_256kb": true
+  }
+}

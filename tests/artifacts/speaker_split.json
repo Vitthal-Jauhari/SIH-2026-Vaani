@@ -1,0 +1,32 @@
+{
+  "verified_zero_leakage": true,
+  "train_speakers": [
+    "Ananya",
+    "Ark",
+    "Mayank",
+    "Umang"
+  ],
+  "validation_speakers": [
+    "Ishita"
+  ],
+  "unseen_test_speakers": [
+    "Vitthal"
+  ],
+  "counts": {
+    "train": {
+      "Ananya": 39,
+      "Ark": 49,
+      "Mayank": 48,
+      "Umang": 50
+    },
+    "validation": {
+      "Ishita": 42
+    },
+    "test_unseen": {
+      "Vitthal": 127
+    }
+  },
+  "total_train_clips": 186,
+  "total_val_clips": 42,
+  "total_test_clips": 127
+}

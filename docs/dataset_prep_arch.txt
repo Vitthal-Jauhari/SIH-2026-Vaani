@@ -1,0 +1,46 @@
+              ┌──────────────────────┐
+              │ DATASET              │
+              │                      │
+              │ 355 Vaani            │ ← YOU ARE HERE
+              │ 105k negatives       │
+              │ 791 noise            │
+              └──────────┬───────────┘
+                         │
+                         ▼
+                 [1] Organize
+                         │
+                         ▼
+                 [2] Duration check  ← NEXT
+                         │
+                         ▼
+                 [3] Manifest
+                         │
+                         ▼
+                 [4] Speaker split
+                         │
+                         ▼
+                 [5] Augmentation
+                         │
+                         ▼
+                 [6] Feature extraction
+                         │
+                         ▼
+                 [7] DS-CNN-S
+                         │
+                         ▼
+                 [8] Evaluation
+                         │
+                         ▼
+                 [9] INT8
+                         │
+                         ▼
+              [10] Improve dataset
+                         │
+                         ▼
+              [11] Compare models
+                         │
+                         ▼
+                    ESP32-S3
+                         │
+                         ▼
+                  Final system

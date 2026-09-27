@@ -1,0 +1,26 @@
+{
+  "duration_minutes": 10.0,
+  "n_embedded_targets": 15,
+  "hop_ms": 100,
+  "buffer_ms": 1000,
+  "cooldown_ms": 800,
+  "threshold": 0.4,
+  "v1": {
+    "total_targets": 15,
+    "detected_targets": 15,
+    "recall": 100.0,
+    "false_triggers": 387,
+    "false_triggers_per_hour": 2322.0,
+    "mean_latency_ms": 413.5,
+    "total_detections": 419
+  },
+  "v2": {
+    "total_targets": 15,
+    "detected_targets": 15,
+    "recall": 100.0,
+    "false_triggers": 300,
+    "false_triggers_per_hour": 1800.0,
+    "mean_latency_ms": 537.3,
+    "total_detections": 328
+  }
+}

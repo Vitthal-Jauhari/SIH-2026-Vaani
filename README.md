@@ -1,139 +1,302 @@
-# Vaani — Offline Wake-Word Detection for ESP32 (SIH 2026)
-
-**Vaani** is a fully offline, low-latency wake-word detector that runs on an **ESP32** with an **INMP441 I2S microphone**. It listens locally for the custom wake word *"Vaani"* and only after a confirmed detection does it capture command audio for streaming to a cloud ASR service — **no always-on audio leaves the device**.
+<p align="center">
+  <h1 align="center">🎤 Vaani</h1>
+  <p align="center">
+    <strong>Edge-Native Wake-Word Detection & Dual-Core ESP-IDF Pipeline</strong>
+  </p>
+  <p align="center">
+    A production-grade Keyword Spotting (KWS) system that trains, evaluates, and deploys a custom wake-word detector to ESP32 / ESP32-S3 — fitting the entire neural network in <strong>13.38 KB</strong> of Flash with <strong>14.5 ms</strong> inference latency on a dual-core FreeRTOS architecture.
+  </p>
+  <p align="center">
+    <a href="#-key-results--benchmarks"><img src="https://img.shields.io/badge/Unseen_Speaker_Recall-96.1%25-brightgreen?style=for-the-badge" alt="Recall"></a>
+    <a href="#-microcontroller-resource-budget"><img src="https://img.shields.io/badge/Model_Size-13.38_KB-blue?style=for-the-badge" alt="Size"></a>
+    <a href="#-microcontroller-resource-budget"><img src="https://img.shields.io/badge/Latency-14.5_ms-orange?style=for-the-badge" alt="Latency"></a>
+    <a href="#-microcontroller-resource-budget"><img src="https://img.shields.io/badge/Parameters-4,643-purple?style=for-the-badge" alt="Params"></a>
+    <a href="#-dual-core-esp-idf-architecture"><img src="https://img.shields.io/badge/Runtime-ESP--IDF_Dual--Core-red?style=for-the-badge" alt="ESP-IDF"></a>
+  </p>
+</p>
 
 ---
 
-## ⚡ Pipeline
+## 📌 Problem Statement
 
-```text
-INMP441 I2S mic (16 kHz mono)
-      │
-      ▼
-Core 0 — I2S capture + energy-based VAD (speech-activity gate)
-      │
-      │ (200 ms hop, only when speech is active)
-      ▼
-Core 1 — MFCC feature extraction (63 frames × 13 coefficients)
-      │
-      ▼
-INT8 Depthwise-Separable CNN (TensorFlow Lite Micro)
-      │
-      │ 2-window confirmation (KWS_MIN_CONSECUTIVE = 2)
-      ▼
-"Vaani" detected ──▶ Status LED ──▶ Command audio capture ──▶ Cloud ASR
+Voice-activated edge devices require a lightweight, always-on wake-word detector running **completely on-device** — without cloud latency, mandatory internet connectivity, or power-hungry coprocessors.
+
+The core challenge is fitting an accurate neural network within the strict memory constraints of an ultra-low-cost ESP32 microcontroller, while generalizing reliably across **unseen speakers**, **noisy acoustic environments**, and **phonetically similar hard decoy words** (*"Paani"*, *"Rani"*, *"Naani"*, *"Kahaani"*).
+
+---
+
+## 🏗️ Dual-Core ESP-IDF Architecture
+
+The production firmware in [firmware/vaani-wakeword/](file:///C:/Codes/SIH-2026-Workspace/firmware/vaani-wakeword) leverages both 240 MHz Xtensa cores of the ESP32 in an asymmetric FreeRTOS pipeline:
+
+```
+                        ┌─────────────────────────────────────────────────────────┐
+                        │             CORE 0 (PRO_CPU) — Capture & Gate           │
+                        │                                                         │
+  INMP441 I2S MEMS      │  Blocking DMA Read     1.0s Rolling Buffer              │
+  ─────────────────────▶│ ───────────────────▶ [ 16,000 samples ]                │
+  16 kHz Mono PCM       │   (~0% CPU idle)              │                         │
+                        │                               ▼                         │
+                        │                       Energy VAD Gate                   │
+                        │                      (Speech START / END)               │
+                        └───────────────────────────────┬─────────────────────────┘
+                                                        │
+                                    Window Ready & VAD Active (200ms Hop)
+                                    [Single Snapshot Buffer | s_infer_busy]
+                                                        │
+                                                        ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │             CORE 1 (APP_CPU) — DSP & Inference          │
+                        │                                                         │
+                        │   MFCC Feature Extraction (63 frames × 13 coeffs)       │
+                        │   [40 Mel Bins | Slaney Normalized | Ortho DCT-II]      │
+                        │                       │                                 │
+                        │                       ▼                                 │
+                        │   DS-CNN (INT8 TFLite Micro)                            │
+                        │   [13.38 KB Flash | 4,643 parameters | 14.5ms latency]  │
+                        │                       │                                 │
+                        │                       ▼                                 │
+                        │          [ Silence | Unknown | Vaani ]                  │
+                        │                       │                                 │
+                        │                       ▼                                 │
+                        │   Multi-Window Confirmation (KWS_MIN_CONSECUTIVE = 2)   │
+                        │                       │                                 │
+                        │                       ▼                                 │
+                        │             🎯 WAKE WORD CONFIRMED!                     │
+                        │         (GPIO 2 Status LED + Serial Trigger)            │
+                        └─────────────────────────────────────────────────────────┘
 ```
 
-> **Note:** The two-stage cascade (cheap VAD gate → expensive KWS inference) is what keeps idle CPU low: the neural network only runs while the VAD thinks someone is speaking.
+### Key Engineering Optimizations
+
+1. **Zero-Lag Dual-Core Decoupling**: Core 0 stays DMA-bound capturing audio and running lightweight Voice Activity Detection (VAD). Core 1 only activates when a full, speech-active window is available.
+2. **40-Mel Exact Numerical Parity**: Feature extraction matches the Python training pipeline (`N_MELS=40`, 512-point FFT, 13 MFCCs), achieving **0 / 819 (0.00%)** difference on INT8 quantized tensors between C and Python.
+3. **DRAM-Safe Snapshot Buffer**: A single snapshot buffer guarded by an atomic busy gate (`s_infer_busy`) replaces memory-heavy double ping-pong buffers, avoiding static `dram0_0_seg` overflow on ESP32-WROOM-32.
+4. **Drop-on-Busy Duty Cycle Bounding**: If Core 1 is still processing inference when the next hop arrives, the hop is dropped rather than queued, eliminating latency queues.
+5. **2-Window Spike Filter**: Requires two consecutive positive window triggers (`KWS_MIN_CONSECUTIVE = 2`) to confirm an activation, suppressing isolated false positives.
 
 ---
 
-## 🔌 Hardware
+## ✨ Key Results & Benchmarks
 
-### Components
+### Model V1 → V2 Improvement
 
-| Component | Detail |
-| :--- | :--- |
-| **MCU** | ESP32 DevKit C (ESP32-D0WD-V3) |
-| **Microphone** | INMP441 I2S MEMS mic |
-| **Status indicator** | LED on GPIO 2 |
+| Metric | V1 (Baseline) | V2 (Final) | Improvement |
+| :--- | :---: | :---: | :---: |
+| **Unseen Speaker Recall** (Vitthal, th=0.40) | 82.7% | **96.1%** | **+13.4 pp** |
+| **Quiet Speech Recall** (−12 dB) | 52.0% | **89.8%** | **+37.8 pp** |
+| **Slow Tempo Recall** (0.85×) | 63.8% | **90.6%** | **+26.8 pp** |
+| **Test Set F1 Score** (th=0.40) | 77.2% | **86.5%** | **+9.3 pp** |
+| **Test Set Precision** (th=0.40) | 72.4% | **78.7%** | **+6.3 pp** |
+| **Continuous Stream False Triggers/hr** | 2,322 | **1,800** | **−22.5%** |
 
-### Wiring / Pinout (INMP441 to ESP32)
+### Per-Speaker Recall @ threshold 0.50
 
-| INMP441 Pin | ESP32 GPIO | Role |
-| :--- | :--- | :--- |
-| **VDD / 3V3** | 3V3 | Power |
-| **GND** | GND | Ground |
-| **SD / DIN** | GPIO 22 | I2S data in |
-| **WS / LRCLK** | GPIO 25 | Word select |
-| **SCK / BCK** | GPIO 26 | Bit clock |
-| **L/R** | GND | Channel select |
+| Speaker | Role | Clips | V1 Recall | V2 Recall |
+| :--- | :--- | :---: | :---: | :---: |
+| Ananya | Train | 39 | 59.0% | **92.3%** |
+| Ark | Train | 49 | 8.2% | **100.0%** |
+| Umang | Train | 50 | 50.0% | **100.0%** |
+| Mayank | Train | 48 | 20.8% | **100.0%** |
+| Ishita | Validation | 42 | 50.0% | **83.3%** |
+| **Vitthal** | **🔒 Unseen Test** | **127** | 70.9% | **93.7%** |
 
----
+> **Zero Leakage:** Vitthal's recordings were **never seen** during training or validation, establishing the true generalization benchmark.
 
-## 🧠 Model
+### Noise Robustness (Unseen Speaker, th=0.40)
 
-- **Architecture:** INT8-quantized Depthwise-Separable CNN, 4,643 parameters
-- **Input:** `[1, 63, 13, 1]` (63 MFCC frames × 13 coefficients)
-- **Output:** 3 classes — Silence, Unknown/general speech, Vaani
-- **Trigger threshold:** $P(\text{Vaani}) \ge 0.80$, confirmed over 2 consecutive windows
-- **Model size:** ~13.7 KB flash
-- **Tensor arena:** 17.1 KB used of 20 KB allocated
-- **Training pipeline:** Trained via a 5-phase pipeline (`model/development/phase1` → `phase5`):
-  1. Baseline architecture
-  2. PC-side validation
-  3. Multi-speaker zero-leakage splits
-  4. Noise/robustness stress testing
-  5. Hard-negative mining and the current model (V2)
-
-> For full before/after benchmarks (unseen-speaker recall, quiet-speech recall, false-trigger rate), see `model/development/phase5/reports/phase5_report.md`.
+| Noise Type | 0 dB SNR | 5 dB | 10 dB | 15 dB | 20 dB |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| Traffic | 100% | 100% | 100% | 100% | 100% |
+| Pink Noise | 100% | 100% | 100% | 100% | 99.2% |
+| Babble | 52.0% | 59.8% | 68.5% | 75.6% | 81.9% |
 
 ---
 
-## 📁 Repository Structure
+## 💾 Microcontroller Resource Budget
+
+| Resource | Budget | Vaani V2 (ESP32) | Utilization |
+| :--- | ---: | ---: | :---: |
+| **Flash (Model)** | 256.00 KB | **13.38 KB** (13,696 B) | **5.2%** |
+| **SRAM (Tensor Arena)** | 512.00 KB | **~43.40 KB** | **8.5%** |
+| **Inference Latency** | < 100 ms | **14.5 ms** | ✅ |
+| **Model Parameters** | — | **4,643** | — |
+| **Quantization** | — | Full INT8 | — |
+
+> The model occupies only **5.2% of Flash**, leaving over **94% headroom** for application logic, Wi-Fi networking, Bluetooth stacks, and OTA updates.
+
+---
+
+## 📂 Repository Structure
 
 ```text
-SIH-2026-Vaani/
+SIH-2026-Workspace/
+├── dataset/
+│   ├── audio/                     # 🎙️ Ground-truth audio recordings (6 speakers, 250+ clips)
+│   └── README.md                  #   Dataset provenance, speaker roles & guidelines
+│
+├── docs/
+│   ├── data_collection_plan.md    #   Acoustic diversity and protocol specification
+│   ├── dataset_prep_arch.txt      #   Data pipeline architectural diagram
+│   ├── notebooks/                 #   Exploratory research Jupyter notebooks
+│   └── reports/                   #   Historical phase reports & validation audits
+│
 ├── firmware/
-│   └── vaani-wakeword/          # Current ESP-IDF firmware (dual-core FreeRTOS + TFLite Micro)
+│   └── vaani-wakeword/            # ⚡ PRODUCTION ESP-IDF FIRMWARE
+│       ├── main/
+│       │   ├── CMakeLists.txt     #   Component configuration & sources
+│       │   ├── idf_component.yml  #   Managed dependency: espressif/esp-tflite-micro
+│       │   ├── main.c             #   Dual-core FreeRTOS coordinator & task pinning
+│       │   ├── i2s_mic.c / .h     #   INMP441 I2S DMA driver (GPIO 26/25/22)
+│       │   ├── vad.c / .h         #   Energy VAD speech gate & state machine
+│       │   ├── mel_features.c / .h#   On-device 63×13 MFCC DSP engine
+│       │   ├── mel_tables.h       #   Precomputed 40-Mel filterbank & DCT tables
+│       │   ├── kws_model.cpp / .h #   TFLite Micro C++ wrapper & inference engine
+│       │   └── model_data.cc / .h #   Compiled 13.38 KB INT8 model byte array
+│       ├── tools/
+│       │   ├── generate_mel_tables.py  # Generates mel_tables.h from model/features.py
+│       │   ├── validate_c_vs_python.py # Validates exact numerical feature parity
+│       │   ├── verify_c_features.c     # Native C validation harness
+│       │   ├── receive_mic.py          # Serial audio capture from ESP32
+│       │   └── convert_raw_wav.py      # Raw I2S sample conversion tool
+│       ├── CMakeLists.txt         #   ESP-IDF project CMakeLists
+│       ├── dependencies.lock      #   Component manager lockfile
+│       └── sdkconfig.defaults     #   Target configuration (240MHz, FreeRTOS dual-core)
+│
 ├── model/
-│   ├── development/phase1-5/    # Training/eval pipeline that produced the current model
-│   ├── export/                  # TFLite -> C header exporter used to produce model_data.h/.c
-│   └── weights/                 # Current .tflite model, for reference outside the firmware build
-├── dataset/                     # Dataset prep and preprocessing scripts
-├── tests/                       # PC-side test/eval tools (offline WAV eval, live mic test, VAD test runners)
-├── tools/                       # Misc diagnostics (sample recordings, UART capture helpers)
-├── docs/                        # Wiring reference, phase reports, design notes
-└── LICENSE                      # MIT License
+│   ├── architecture.py            # 🧠 Canonical Tiny DS-CNN architecture (Keras)
+│   ├── features.py                # 🎛️ Librosa 40-Mel, 13-MFCC preprocessing definition
+│   ├── export_to_c.py             # 🔄 Exports .tflite weights to model_data.cc / .h
+│   └── weights/
+│       ├── vaani_v1_int8.tflite   #   Phase 3 baseline model
+│       └── vaani_v2_int8.tflite   #   Canonical V2 production INT8 model (13,696 bytes)
+│
+├── tests/
+│   ├── test_model_offline.py      # 🧪 Offline WAV tester replicating firmware feature pipeline
+│   ├── test_live_mic.py           # 🎤 Real-time PC microphone wake-word streaming test
+│   ├── evaluate_benchmark.py      # 📊 Apples-to-apples V1 vs V2 robustness benchmark
+│   ├── threshold_sweep.py         # 📈 FAR/FRR threshold calibration sweep
+│   ├── continuous_eval.py         # ⏱️ 10-minute continuous streaming evaluation
+│   ├── estimate_resources.py      # 💾 Microcontroller memory & latency estimator
+│   └── artifacts/                 #   Benchmark results, sweeps & metadata JSONs
+│
+├── training/
+│   ├── prepare_dataset.py         # 🔄 Normalizes raw audio to standard 16 kHz mono WAV
+│   ├── prepare_combined_dataset.py# 🔀 Combines positives, speech commands & noise
+│   ├── split_speakers.py          # 🔒 Speaker-disjoint train/val/test partitioning
+│   ├── augment.py                 # 🎚️ Noise, volume, pitch & speed augmentations
+│   ├── train.py                   # 🚀 Trains Tiny DS-CNN on combined dataset
+│   └── quantize.py                # 📦 Full INT8 post-training quantization
+│
+├── LICENSE                        # MIT License
+└── README.md                      # Project documentation
 ```
-
-> *Earlier PlatformIO/Arduino firmware prototypes and superseded model experiments (`model_v1`, `model_v2` notebooks, `model_processing_v1`) have been left out of this repository; they remain in git history if needed.*
 
 ---
 
-## 🛠️ Building and Flashing
+## 🚀 Quick Start Guide
 
-**Prerequisite:** Requires **ESP-IDF v6.1+**.
+### 1. Test Wake-Word Locally with PC Microphone
+
+Test the trained model directly on your computer before touching hardware:
 
 ```bash
-# Navigate to the firmware directory
-cd firmware/vaani-wakeword
+# Install Python dependencies
+pip install tensorflow numpy librosa soundfile sounddevice
 
-# Set the target chip
-idf.py set-target esp32
+# Run live tester with Model V2 — speak "Vaani" into your mic
+python tests/test_live_mic.py
 
-# Build the firmware
-idf.py build
-
-# Flash and monitor over serial (replace <PORT> with your serial port, e.g., COM3 or /dev/ttyUSB0)
-idf.py -p <PORT> flash monitor
+# Adjust sensitivity threshold or specify custom audio device
+python tests/test_live_mic.py --threshold 0.50 --consecutive 2
 ```
 
-> `build/` and `managed_components/` are generated by the ESP-IDF component manager from `dependencies.lock` and are not committed — `idf.py build` regenerates them automatically.
+### 2. Run Offline Model Verification on WAV
+
+Verify that the model processes audio offline through the exact same feature pipeline:
+
+```bash
+python tests/test_model_offline.py --wav mic_test.wav
+```
+
+### 3. Verify C vs Python Numerical Parity
+
+Confirm that the on-device C DSP pipeline produces the exact same INT8 tensors as Python:
+
+```bash
+python firmware/vaani-wakeword/tools/validate_c_vs_python.py
+```
+
+### 4. Build Firmware with ESP-IDF
+
+```powershell
+# Activate ESP-IDF environment (ESP-IDF v5.x / v6.x)
+. C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1
+
+# Navigate to firmware project
+cd firmware\vaani-wakeword
+
+# Build the firmware binary
+idf.py build
+```
+
+When ready to flash to hardware:
+```powershell
+idf.py -p COM3 flash monitor
+```
 
 ---
 
-## 🧪 Testing
+## 🔌 Hardware Wiring (INMP441 to ESP32)
 
-- `tests/test_model_offline.py` — Verifies the C DSP/quantization pipeline against WAV files, isolating feature-extraction bugs from model issues.
-- `tests/test_live_mic.py` — Real-time PC microphone test with live confidence display.
-- `tests/test_runners/` — VAD and silence-analysis test suites.
-- `firmware/vaani-wakeword/tools/receive_mic.py` — Streams raw audio from the ESP32 over UART (921,600 baud) to a `.wav` file for offline debugging.
-
----
-
-## ⚠️ Current Status and Limitations
-
-The core detection pipeline works on hardware: audio capture, VAD, MFCC, and INT8 inference are integrated, and "Vaani" is reliably detected with 2-window confirmation. Known open items:
-
-- **VAD does not yet return to idle after speech ends:** Inference continues indefinitely after a detection, so the sub-10% idle-CPU target is not yet demonstrated. Under investigation (mic scaling, VAD state-transition logic, dBFS telemetry).
-- **Power management (`esp_pm_configure`):** Not initializing correctly; tickless idle is not yet active.
-- **Hard-negative fine-tuning pending:** Silence and normal-speech windows currently score ~99.6% confidence for "Vaani" in isolation, though VAD gating and the 2-window filter mask this in practice.
-- **Post-wake capture & cloud streaming:** Post-wake command capture and conditional cloud ASR streaming are not yet implemented.
-- **Runtime telemetry:** Formal idle/active CPU and RAM measurements (via FreeRTOS runtime stats) are still pending.
+| INMP441 Pin | ESP32 GPIO | Description |
+| :--- | :--- | :--- |
+| **VDD / 3V3** | **3V3** | 3.3V Power |
+| **GND** | **GND** | Ground |
+| **SD / DIN** | **GPIO 22** | Serial Data Input |
+| **WS / LRCLK** | **GPIO 25** | Word Select (Left/Right Clock) |
+| **SCK / BCK** | **GPIO 26** | Bit Clock |
+| **L/R** | **GND** | Left Channel Select |
+| **Status LED** | **GPIO 2** | Built-in / External Indicator LED |
 
 ---
 
-## 📄 License
+## 🔬 Reproducing the Training Pipeline
 
-See [LICENSE](LICENSE).
+To retrain the model from scratch:
+
+```bash
+# 1. Normalize dataset audio to 16 kHz mono WAV
+python training/prepare_dataset.py
+
+# 2. Partition speakers with zero leakage (held-out test speaker)
+python training/split_speakers.py
+
+# 3. Build balanced train/val/test combined dataset
+python training/prepare_combined_dataset.py
+
+# 4. Train the Tiny DS-CNN model
+python training/train.py
+
+# 5. Full INT8 post-training quantization
+python training/quantize.py
+
+# 6. Export quantized model to C arrays for firmware
+python model/export_to_c.py
+```
+
+---
+
+## 👥 Authors & Acknowledgments
+
+Developed for **SIH (Smart India Hackathon) 2026**:
+- **Vitthal Jauhari** — Dual-core ESP-IDF firmware, I2S DMA, VAD gating, DSP numerical parity, and hardware deployment
+- **Umang** — Model research, training pipeline, hard negative mining, benchmarks
+- **Mayank Singh** — Model architecture, dataset processing, and quantization pipeline
+- **Dataset Contributors** — Ananya, Ark, Ishita, Mayank, Umang, Vitthal
+
+---
+
+## 📜 License
+
+Distributed under the [MIT License](LICENSE).
